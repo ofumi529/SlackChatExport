@@ -76,6 +76,16 @@ receiver.router.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
+// Event Subscriptions URL検証処理
+receiver.router.post('/slack/events', (req: Request, res: Response, next) => {
+  // URL検証チャレンジ
+  if (req.body && req.body.challenge) {
+    res.status(200).send(req.body.challenge);
+    return;
+  }
+  next();
+});
+
 // スラッシュコマンド: /export-chat
 app.command('/export-chat', async ({ command, ack, respond, client }) => {
   await ack();
