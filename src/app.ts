@@ -88,7 +88,9 @@ receiver.router.post('/slack/events', (req: Request, res: Response, next) => {
 
 // スラッシュコマンド: /export-chat
 app.command('/export-chat', async ({ command, ack, respond, client }) => {
+  console.log('Received /export-chat command:', command);
   await ack();
+  console.log('Command acknowledged');
   
   try {
     const args = command.text.trim().split(/\s+/);
@@ -223,9 +225,25 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
   }
 });
 
+// グローバルエラーハンドリング
+app.error(async (error) => {
+  console.error('Global error occurred:', error);
+});
+
 // アプリケーション開始
 (async () => {
-  const port = process.env.PORT || 3000;
-  await app.start(Number(port));
-  console.log(`⚡️ Slack Bot が ポート ${port} で起動しました`);
+  try {
+    const port = process.env.PORT || 3000;
+    console.log('Starting Slack Bot...');
+    console.log('Environment variables check:');
+    console.log('- SLACK_BOT_TOKEN:', process.env.SLACK_BOT_TOKEN ? 'Set' : 'Not set');
+    console.log('- SLACK_SIGNING_SECRET:', process.env.SLACK_SIGNING_SECRET ? 'Set' : 'Not set');
+    console.log('- PORT:', port);
+    
+    await app.start(Number(port));
+    console.log(`⚡️ Slack Bot が ポート ${port} で起動しました`);
+  } catch (error) {
+    console.error('Failed to start app:', error);
+    process.exit(1);
+  }
 })();
