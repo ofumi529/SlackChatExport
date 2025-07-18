@@ -75,9 +75,12 @@ function formatMessageMarkdown(message: any, users: Map<string, string>, indent:
   }
 }
 
-// スレッド返信を取得
+// スレッド返信を取得（レート制限対応）
 async function getThreadReplies(client: any, channelId: string, threadTs: string): Promise<any[]> {
   try {
+    // API呼び出し前に遅延を追加（レート制限回避）
+    await new Promise(resolve => setTimeout(resolve, 500)); // 500ms遅延
+    
     const result = await client.conversations.replies({
       channel: channelId,
       ts: threadTs,
@@ -91,6 +94,29 @@ async function getThreadReplies(client: any, channelId: string, threadTs: string
     return [];
   } catch (error) {
     console.error('スレッド返信の取得に失敗:', error);
+    
+    // レート制限エラーの場合はさらに待機
+    if ((error as any).code === 'slack_webapi_rate_limited') {
+      const retryAfter = (error as any).retryAfter || 60;
+      console.log(`Rate limited. Waiting ${retryAfter} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+      
+      // 再試行
+      try {
+        const retryResult = await client.conversations.replies({
+          channel: channelId,
+          ts: threadTs,
+          limit: 1000
+        });
+        
+        if (retryResult.messages && retryResult.messages.length > 1) {
+          return retryResult.messages.slice(1);
+        }
+      } catch (retryError) {
+        console.error('リトライでも失敗:', retryError);
+      }
+    }
+    
     return [];
   }
 }
@@ -311,26 +337,50 @@ async function processExportAsync(command: any, respond: any, client: any) {
     }
     
     // スレッド返信を含めたメッセージ処理（テキスト形式）
+    console.log('Processing messages and threads...');
     const allMessages: string[] = [];
     const allMessagesMarkdown: string[] = [];
     let totalMessageCount = messages.length;
     
+    // スレッドを持つメッセージを特定
+    const threadMessages = messages.filter(msg => msg.thread_ts && msg.thread_ts === msg.ts);
+    console.log(`Found ${threadMessages.length} thread parent messages`);
+    
+    // メッセージを処理（スレッドは後でバッチ処理）
     for (const msg of messages) {
       // 親メッセージを追加
       allMessages.push(formatMessage(msg, users));
       allMessagesMarkdown.push(formatMessageMarkdown(msg, users));
+    }
+    
+    // スレッド返信をバッチ処理（レート制限回避）
+    if (threadMessages.length > 0) {
+      console.log('Processing thread replies in batches...');
       
-      // スレッド返信があるかチェック
-      if (msg.thread_ts && msg.thread_ts === msg.ts) {
-        const replies = await getThreadReplies(client, channelId, msg.thread_ts);
+      for (let i = 0; i < threadMessages.length; i++) {
+        const msg = threadMessages[i];
+        console.log(`Processing thread ${i + 1}/${threadMessages.length}: ${msg.thread_ts}`);
+        
+        const replies = await getThreadReplies(client, channelId, msg.thread_ts!);
         totalMessageCount += replies.length;
         
-        // 返信をインデント付きで追加
-        for (const reply of replies) {
-          allMessages.push(formatMessage(reply, users, '  └─ '));
-          allMessagesMarkdown.push(formatMessageMarkdown(reply, users, '  '));
+        // 返信をメッセージの適切な位置に挿入
+        const parentIndex = allMessages.findIndex(m => m.includes(msg.ts!));
+        if (parentIndex !== -1) {
+          const replyTexts = replies.map(reply => formatMessage(reply, users, '  └─ '));
+          const replyMarkdowns = replies.map(reply => formatMessageMarkdown(reply, users, '  '));
+          
+          allMessages.splice(parentIndex + 1, 0, ...replyTexts);
+          allMessagesMarkdown.splice(parentIndex + 1, 0, ...replyMarkdowns);
+        }
+        
+        // 進捗状況をログ出力
+        if ((i + 1) % 5 === 0 || i === threadMessages.length - 1) {
+          console.log(`Processed ${i + 1}/${threadMessages.length} threads`);
         }
       }
+      
+      console.log('Thread processing completed');
     }
     
     // ファイル内容を生成（日本時間で表示）
