@@ -48,16 +48,31 @@ function parseDateTime(dateStr: string): Date | null {
   }
 }
 
-// メッセージを整形（日本時間で表示）
+// メッセージを整形（テキスト形式）
 function formatMessage(message: any, users: Map<string, string>, indent: string = ''): string {
   const timestamp = new Date(parseFloat(message.ts) * 1000);
-  // 日本時間で表示（UTC+9）
   const jstTimestamp = addHours(timestamp, 9);
   const formattedTime = format(jstTimestamp, 'yyyy-MM-dd HH:mm:ss');
   const userName = users.get(message.user) || message.user || 'Unknown User';
   const text = message.text || '';
   
   return `${indent}[${formattedTime}] ${userName}: ${text}`;
+}
+
+// メッセージをMarkdown形式で整形
+function formatMessageMarkdown(message: any, users: Map<string, string>, indent: string = ''): string {
+  const timestamp = new Date(parseFloat(message.ts) * 1000);
+  const jstTimestamp = addHours(timestamp, 9);
+  const formattedTime = format(jstTimestamp, 'yyyy-MM-dd HH:mm:ss');
+  const userName = users.get(message.user) || message.user || 'Unknown User';
+  const text = message.text || '';
+  
+  // Markdownフォーマット
+  if (indent) {
+    return `${indent}> **${userName}** \`${formattedTime}\`\n${indent}> ${text}\n`;
+  } else {
+    return `### ${userName} \`${formattedTime}\`\n\n${text}\n`;
+  }
 }
 
 // スレッド返信を取得
@@ -101,6 +116,69 @@ async function getUsersInfo(app: App): Promise<Map<string, string>> {
 // ヘルスチェックエンドポイント（Railway用）
 receiver.router.get('/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// ファイルダウンロードエンドポイント
+receiver.router.get('/download/:filename', (req: Request, res: Response) => {
+  const filename = req.params.filename;
+  const filePath = path.join(EXPORTS_DIR, filename);
+  
+  // ファイルの存在確認
+  if (!filename || !filename.match(/^[a-zA-Z0-9_-]+\.(txt|md)$/)) {
+    res.status(400).send('Invalid filename');
+    return;
+  }
+  
+  res.download(filePath, (err) => {
+    if (err) {
+      console.error('File download error:', err);
+      res.status(404).send('File not found');
+    }
+  });
+});
+
+// ファイル一覧表示エンドポイント
+receiver.router.get('/files', async (req: Request, res: Response) => {
+  try {
+    await ensureExportsDir();
+    const files = await fs.readdir(EXPORTS_DIR);
+    const fileList = files.filter(f => f.endsWith('.txt') || f.endsWith('.md'));
+    
+    const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Slack Chat Export Files</title>
+      <meta charset="utf-8">
+      <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .file-item { margin: 10px 0; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+        .download-btn { background: #007cba; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px; }
+        .download-btn:hover { background: #005a87; }
+      </style>
+    </head>
+    <body>
+      <h1>📄 Slack Chat Export Files</h1>
+      <p>エクスポートされたチャット履歴ファイル一覧</p>
+      ${fileList.length === 0 ? '<p>ファイルがありません</p>' : 
+        fileList.map(file => `
+          <div class="file-item">
+            <strong>${file}</strong><br>
+            <a href="/download/${file}" class="download-btn">📥 ダウンロード</a>
+          </div>
+        `).join('')
+      }
+      <hr>
+      <p><small>ファイルは一定期間後に自動削除されます</small></p>
+    </body>
+    </html>
+    `;
+    
+    res.send(html);
+  } catch (error) {
+    console.error('Files list error:', error);
+    res.status(500).send('Error loading files');
+  }
 });
 
 // Event Subscriptions URL検証処理
@@ -204,13 +282,15 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
       console.error('チャンネル情報の取得に失敗:', error);
     }
     
-    // スレッド返信を含めたメッセージ処理
+    // スレッド返信を含めたメッセージ処理（テキスト形式）
     const allMessages: string[] = [];
+    const allMessagesMarkdown: string[] = [];
     let totalMessageCount = messages.length;
     
     for (const msg of messages) {
       // 親メッセージを追加
       allMessages.push(formatMessage(msg, users));
+      allMessagesMarkdown.push(formatMessageMarkdown(msg, users));
       
       // スレッド返信があるかチェック
       if (msg.thread_ts && msg.thread_ts === msg.ts) {
@@ -220,6 +300,7 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
         // 返信をインデント付きで追加
         for (const reply of replies) {
           allMessages.push(formatMessage(reply, users, '  └─ '));
+          allMessagesMarkdown.push(formatMessageMarkdown(reply, users, '  '));
         }
       }
     }
@@ -230,28 +311,50 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
     const jstStartDate = addHours(startDate, 9);
     const jstEndDate = addHours(endDate, 9);
     
-    const header = `# ${channelName} チャット履歴\n` +
-                  `エクスポート期間: ${format(jstStartDate, 'yyyy-MM-dd')} ～ ${format(jstEndDate, 'yyyy-MM-dd')} (JST)\n` +
-                  `エクスポート日時: ${format(jstNow, 'yyyy-MM-dd HH:mm:ss')} (JST)\n` +
-                  `メッセージ数: ${totalMessageCount}件 (スレッド返信含む)\n\n` +
-                  `${'='.repeat(50)}\n\n`;
+    // テキスト形式のヘッダー
+    const headerText = `# ${channelName} チャット履歴\n` +
+                      `エクスポート期間: ${format(jstStartDate, 'yyyy-MM-dd')} ～ ${format(jstEndDate, 'yyyy-MM-dd')} (JST)\n` +
+                      `エクスポート日時: ${format(jstNow, 'yyyy-MM-dd HH:mm:ss')} (JST)\n` +
+                      `メッセージ数: ${totalMessageCount}件 (スレッド返信含む)\n\n` +
+                      `${'='.repeat(50)}\n\n`;
     
-    const content = header + allMessages.join('\n');
+    // Markdown形式のヘッダー
+    const headerMarkdown = `# ${channelName} チャット履歴\n\n` +
+                          `**エクスポート期間**: ${format(jstStartDate, 'yyyy-MM-dd')} ～ ${format(jstEndDate, 'yyyy-MM-dd')} (JST)\n` +
+                          `**エクスポート日時**: ${format(jstNow, 'yyyy-MM-dd HH:mm:ss')} (JST)\n` +
+                          `**メッセージ数**: ${totalMessageCount}件 (スレッド返信含む)\n\n` +
+                          `---\n\n`;
+    
+    const contentText = headerText + allMessages.join('\n');
+    const contentMarkdown = headerMarkdown + allMessagesMarkdown.join('\n');
     
     // ファイルを保存
     await ensureExportsDir();
-    const fileName = `${channelName}_${format(jstStartDate, 'yyyyMMdd')}-${format(jstEndDate, 'yyyyMMdd')}.txt`;
-    const filePath = path.join(EXPORTS_DIR, fileName);
+    const baseFileName = `${channelName}_${format(jstStartDate, 'yyyyMMdd')}-${format(jstEndDate, 'yyyyMMdd')}`;
+    const txtFileName = `${baseFileName}.txt`;
+    const mdFileName = `${baseFileName}.md`;
+    const txtFilePath = path.join(EXPORTS_DIR, txtFileName);
+    const mdFilePath = path.join(EXPORTS_DIR, mdFileName);
     
-    await fs.writeFile(filePath, content, 'utf-8');
+    await fs.writeFile(txtFilePath, contentText, 'utf-8');
+    await fs.writeFile(mdFilePath, contentMarkdown, 'utf-8');
     
-    // Slackにファイルをアップロード
+    // Railwayのドメインを取得（環境変数またはデフォルト）
+    const domain = process.env.RAILWAY_STATIC_URL || process.env.RAILWAY_PUBLIC_DOMAIN || 'your-app-domain.up.railway.app';
+    
+    // Slackにファイルをアップロード（テキスト形式）
     await client.files.uploadV2({
       channels: channelId,
-      file: await fs.readFile(filePath),
-      filename: fileName,
+      file: await fs.readFile(txtFilePath),
+      filename: txtFileName,
       title: `${channelName} チャット履歴 (${format(jstStartDate, 'yyyy-MM-dd')} ～ ${format(jstEndDate, 'yyyy-MM-dd')} JST)`,
-      initial_comment: `チャット履歴のエクスポートが完了しました！\n期間: ${format(jstStartDate, 'yyyy-MM-dd')} ～ ${format(jstEndDate, 'yyyy-MM-dd')} (JST)\nメッセージ数: ${totalMessageCount}件 (スレッド返信含む)`
+      initial_comment: `チャット履歴のエクスポートが完了しました！\n\n` +
+                      `📅 **期間**: ${format(jstStartDate, 'yyyy-MM-dd')} ～ ${format(jstEndDate, 'yyyy-MM-dd')} (JST)\n` +
+                      `💬 **メッセージ数**: ${totalMessageCount}件 (スレッド返信含む)\n\n` +
+                      `📥 **ダウンロードリンク**:\n` +
+                      `・ テキスト形式: https://${domain}/download/${txtFileName}\n` +
+                      `・ Markdown形式: https://${domain}/download/${mdFileName}\n` +
+                      `・ ファイル一覧: https://${domain}/files`
     });
     
   } catch (error) {
