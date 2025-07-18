@@ -79,7 +79,7 @@ function formatMessageMarkdown(message: any, users: Map<string, string>, indent:
 async function getThreadReplies(client: any, channelId: string, threadTs: string): Promise<any[]> {
   try {
     // API呼び出し前に遅延を追加（レート制限回避）
-    await new Promise(resolve => setTimeout(resolve, 500)); // 500ms遅延
+    await new Promise(resolve => setTimeout(resolve, 2000)); // 2秒遅延
     
     const result = await client.conversations.replies({
       channel: channelId,
@@ -357,6 +357,13 @@ async function processExportAsync(command: any, respond: any, client: any) {
     if (threadMessages.length > 0) {
       console.log('Processing thread replies in batches...');
       
+      // 処理時間の見積もりを通知
+      const estimatedMinutes = Math.ceil((threadMessages.length * 2) / 60);
+      await respond({
+        text: `💬 ${threadMessages.length}個のスレッドを処理中です...　約${estimatedMinutes}分かかります。　レート制限回避のため、各スレッド間に2秒の間隔をあけています。`,
+        response_type: 'ephemeral'
+      });
+      
       for (let i = 0; i < threadMessages.length; i++) {
         const msg = threadMessages[i];
         console.log(`Processing thread ${i + 1}/${threadMessages.length}: ${msg.thread_ts}`);
@@ -374,13 +381,27 @@ async function processExportAsync(command: any, respond: any, client: any) {
           allMessagesMarkdown.splice(parentIndex + 1, 0, ...replyMarkdowns);
         }
         
-        // 進捗状況をログ出力
-        if ((i + 1) % 5 === 0 || i === threadMessages.length - 1) {
+        // 進捗状況をログ出力とユーザー通知
+        if ((i + 1) % 10 === 0 || i === threadMessages.length - 1) {
           console.log(`Processed ${i + 1}/${threadMessages.length} threads`);
+          
+          // 10スレッドごとに進捗を通知
+          if ((i + 1) % 10 === 0 && i < threadMessages.length - 1) {
+            await respond({
+              text: `📊 進捗: ${i + 1}/${threadMessages.length} スレッド処理完了 (残り約${Math.ceil(((threadMessages.length - i - 1) * 2) / 60)}分)`,
+              response_type: 'ephemeral'
+            });
+          }
         }
       }
       
       console.log('Thread processing completed');
+      
+      // スレッド処理完了を通知
+      await respond({
+        text: `✅ スレッド処理完了！ ${threadMessages.length}個のスレッドを処理しました。ファイルを生成中...`,
+        response_type: 'ephemeral'
+      });
     }
     
     // ファイル内容を生成（日本時間で表示）
