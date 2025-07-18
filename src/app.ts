@@ -197,8 +197,24 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
   await ack();
   console.log('Command acknowledged');
   
+  // 即座に処理開始を通知
+  await respond({
+    text: 'チャット履歴をエクスポート中です... しばらくお待ちください。',
+    response_type: 'ephemeral'
+  });
+  
+  // バックグラウンドで処理を実行
+  processExportAsync(command, respond, client).catch(error => {
+    console.error('Async export process failed:', error);
+  });
+});
+
+// 非同期エクスポート処理
+async function processExportAsync(command: any, respond: any, client: any) {
+  console.log('Starting async export process...');
   try {
     const args = command.text.trim().split(/\s+/);
+    console.log('Command args:', args);
     
     if (args.length < 2) {
       await respond({
@@ -230,20 +246,27 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
       return;
     }
     
+    console.log('Sending progress message...');
     await respond({
       text: 'チャット履歴をエクスポート中です... しばらくお待ちください。',
       response_type: 'ephemeral'
     });
+    console.log('Progress message sent');
     
     // チャンネル履歴を取得
+    console.log('Fetching channel history...');
     const channelId = command.channel_id;
     const startTs = Math.floor(startDate.getTime() / 1000).toString();
     const endTs = Math.floor(endDate.getTime() / 1000).toString();
+    console.log(`Channel: ${channelId}, Start: ${startTs}, End: ${endTs}`);
     
     const messages: any[] = [];
     let cursor: string | undefined;
+    let pageCount = 0;
     
     do {
+      pageCount++;
+      console.log(`Fetching page ${pageCount}...`);
       const result = await client.conversations.history({
         channel: channelId,
         oldest: startTs,
@@ -254,10 +277,13 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
       
       if (result.messages) {
         messages.push(...result.messages);
+        console.log(`Got ${result.messages.length} messages, total: ${messages.length}`);
       }
       
       cursor = result.response_metadata?.next_cursor;
     } while (cursor);
+    
+    console.log(`Finished fetching messages. Total: ${messages.length}`);
     
     if (messages.length === 0) {
       await respond({
@@ -271,7 +297,9 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
     messages.sort((a, b) => parseFloat(a.ts) - parseFloat(b.ts));
     
     // ユーザー情報を取得
+    console.log('Fetching user info...');
     const users = await getUsersInfo(app);
+    console.log(`Got info for ${users.size} users`);
     
     // チャンネル情報を取得
     let channelName = 'unknown-channel';
@@ -377,7 +405,7 @@ app.command('/export-chat', async ({ command, ack, respond, client }) => {
       response_type: 'ephemeral'
     });
   }
-});
+}
 
 // グローバルエラーハンドリング
 app.error(async (error) => {
